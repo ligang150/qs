@@ -103,47 +103,17 @@ document.addEventListener('DOMContentLoaded', function() {
 function showAuthOverlay(errorMsg) {
     document.getElementById('authOverlay').style.display = 'flex';
     if (errorMsg) document.getElementById('authError').textContent = errorMsg;
-    loadAuthUsers();
 }
 
 function hideAuthOverlay() {
     document.getElementById('authOverlay').style.display = 'none';
 }
 
-async function loadAuthUsers() {
-    const select = document.getElementById('authUserSelect');
-    select.innerHTML = '<option value="">请选择员工</option>';
-    select.disabled = true;
-    document.getElementById('authError').textContent = '正在加载员工列表...';
-
-    try {
-        const response = await fetch(`${API_BASE}/auth/users`);
-        const data = await response.json();
-        if (data.success && Array.isArray(data.users) && data.users.length > 0) {
-            select.disabled = false;
-            document.getElementById('authError').textContent = '';
-            data.users.forEach(user => {
-                const option = document.createElement('option');
-                option.value = user.employee_id;
-                option.textContent = user.name;
-                select.appendChild(option);
-            });
-        } else {
-            select.innerHTML = '<option value="">员工列表加载失败</option>';
-            document.getElementById('authError').textContent = data.error || '员工列表为空';
-        }
-    } catch (error) {
-        console.error('加载用户列表失败', error);
-        select.innerHTML = '<option value="">员工列表加载失败</option>';
-        document.getElementById('authError').textContent = '加载员工列表失败，请稍后重试';
-    }
-}
-
 async function doAuth() {
-    const selectedEmployeeId = document.getElementById('authUserSelect').value;
+    const employeeIdInput = document.getElementById('authUserInput').value.trim();
     const password = document.getElementById('authPassword').value.trim();
-    if (!selectedEmployeeId) {
-        document.getElementById('authError').textContent = '请选择员工';
+    if (!employeeIdInput) {
+        document.getElementById('authError').textContent = '请输入员工号';
         return;
     }
     if (!password) {
@@ -154,19 +124,19 @@ async function doAuth() {
         const response = await fetch(`${API_BASE}/auth/login`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ employee_id: selectedEmployeeId, password })
+            body: JSON.stringify({ employee_id: employeeIdInput, password })
         });
         const data = await response.json();
         if (data.success) {
-            console.log('[doAuth] selectedEmployeeId=', selectedEmployeeId, 'before: employeeId=', employeeId, 'currentUser.id=', currentUser.id);
+            console.log('[doAuth] employeeIdInput=', employeeIdInput, 'before: employeeId=', employeeId, 'currentUser.id=', currentUser.id);
             accessPassword = data.access_password || '';
-            employeeId = selectedEmployeeId;
+            employeeId = employeeIdInput;
             const name = data.user?.name || '用户';
             localStorage.setItem('accessPassword', accessPassword);
-            localStorage.setItem('employeeId', selectedEmployeeId);
+            localStorage.setItem('employeeId', employeeIdInput);
             localStorage.setItem('userName', name);
             currentUser.name = name;
-            currentUser.id = selectedEmployeeId;
+            currentUser.id = employeeIdInput;
             console.log('[doAuth] after: employeeId=', employeeId, 'currentUser.id=', currentUser.id);
             hideAuthOverlay();
             initApp();

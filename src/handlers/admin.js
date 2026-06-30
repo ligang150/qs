@@ -5,21 +5,71 @@ import { clearCache } from '../calc-engine.js';
 
 const ACCESS_PASSWORD = "queue2025";
 
-function requireAdmin(request) {
+function requireAuth(request) {
   const password = request.headers.get('X-Access-Password') || '';
-  if (password !== ACCESS_PASSWORD) return false;
+  return password === ACCESS_PASSWORD;
+}
+
+function requireAdmin(request) {
+  if (!requireAuth(request)) return false;
   const employeeId = normalizeUserKey(request.headers.get('X-Employee-Id') || '');
   return employeeId === ADMIN_EMPLOYEE_ID;
 }
 
+function decodeJwtExpiry(token) {
+  if (!token) return 0;
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return 0;
+    const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+    return (payload.exp || 0);
+  } catch (e) {
+    return 0;
+  }
+}
+
+function maskValue(value) {
+  if (!value) return "";
+  const s = String(value);
+  if (s.length <= 8) return `${s[0]}***${s[s.length-1]}`;
+  return `${s.slice(0,4)}***${s.slice(-4)}`;
+}
+
+const ACCESS_TOKEN_DEFAULT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjbHQiOiJkYTgxNWQxMjI3Mjk0NDU3YjQzNDEzYmRjMTZlM2U5MCIsInR5cCI6MSwiZXhwIjoxNzgyMDk0NTcyLjEwODc1MywiaWF0IjoxNzc5NTAyNTcyLjEwODc1Mywic3ViIjoiOWJjMTcyZTUzMzgxNDdkOGEzNWMxNDM4ZWE4ZDE1NzcifQ.rm3BIdD1V7FrCwdToT2arErs06xWF7hTqAh0KsCKsdw";
+
 export async function handleAdminStatus(request) {
   if (!requireAdmin(request)) return jsonResponse({ success: false, error: "无管理员权限" }, 403);
 
+  const now = Math.floor(Date.now() / 1000);
+  const tokenExp = decodeJwtExpiry(ACCESS_TOKEN_DEFAULT);
+  const remainingSeconds = tokenExp > now ? tokenExp - now : 0;
+
+  const items = [
+    {
+      name: "TENCENT_ACCESS_TOKEN",
+      present: true,
+      remaining_seconds: remainingSeconds,
+      masked: maskValue(ACCESS_TOKEN_DEFAULT)
+    },
+    {
+      name: "RENDER_API_KEY",
+      present: true,
+      remaining_seconds: null,
+      masked: "由主 Render 服务管理"
+    },
+    {
+      name: "GITHUB_TOKEN",
+      present: true,
+      remaining_seconds: null,
+      masked: "由主 Render 服务管理"
+    }
+  ];
+
   return jsonResponse({
     success: true,
+    items,
     service: "Cloudflare Worker",
     mode: "backup",
-    keys_valid: true,
     version: "cf-v1.0"
   });
 }
@@ -113,9 +163,4 @@ export async function handleAdminModelConfigsGet(request) {
 export async function handleAdminModelConfigsPost(request) {
   if (!requireAdmin(request)) return jsonResponse({ success: false, error: "无管理员权限" }, 403);
   return jsonResponse({ success: false, error: "CloudFlare版本不支持修改牌号配置" });
-}
-
-function requireAuth(request) {
-  const password = request.headers.get('X-Access-Password') || '';
-  return password === ACCESS_PASSWORD;
 }

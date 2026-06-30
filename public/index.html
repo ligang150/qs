@@ -29,9 +29,7 @@
             <h2>需要授权访问</h2>
             <p>本系统仅限授权用户使用</p>
             <div class="auth-form">
-                <select id="authUserSelect" onchange="document.getElementById('authError').textContent=''">
-                    <option value="">请选择员工</option>
-                </select>
+                <input type="text" id="authUserInput" placeholder="请输入员工号">
                 <input type="password" id="authPassword" placeholder="请输入密码" onkeydown="if(event.key==='Enter')doAuth()">
                 <button onclick="doAuth()">登 录</button>
             </div>
