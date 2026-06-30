@@ -12,20 +12,56 @@ const USER_FILE_ID = "DRmxUY0RBQVJXRXpC";
 const USER_SHEET_ID = "s9osf8";
 const CONFIG_FILE_ID = "DRnhDemRIS25mdnFF";
 
+const DEFAULT_ACCESS_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjbHQiOiJkYTgxNWQxMjI3Mjk0NDU3YjQzNDEzYmRjMTZlM2U5MCIsInR5cCI6MSwiZXhwIjoxNzgyMDk0NTcyLjEwODc1MywiaWF0IjoxNzc5NTAyNTcyLjEwODc1Mywic3ViIjoiOWJjMTcyZTUzMzgxNDdkOGEzNWMxNDM4ZWE4ZDE1NzcifQ.rm3BIdD1V7FrCwdToT2arErs06xWF7hTqAh0KsCKsdw";
+
 let CLIENT_ID = "da815d1227294457b43413bdc16e3e90";
-let ACCESS_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjbHQiOiJkYTgxNWQxMjI3Mjk0NDU3YjQzNDEzYmRjMTZlM2U5MCIsInR5cCI6MSwiZXhwIjoxNzgyMDk0NTcyLjEwODc1MywiaWF0IjoxNzc5NTAyNTcyLjEwODc1Mywic3ViIjoiOWJjMTcyZTUzMzgxNDdkOGEzNWMxNDM4ZWE4ZDE1NzcifQ.rm3BIdD1V7FrCwdToT2arErs06xWF7hTqAh0KsCKsdw";
 let OPEN_ID = "9bc172e5338147d8a35c1438ea8d1577";
+
+// KV-backed token store
+let _tokenStore = null;
+let _cachedToken = null;
+
+export function setTokenStore(kv) {
+  _tokenStore = kv;
+}
+
+export async function getAccessToken() {
+  if (_tokenStore) {
+    try {
+      const stored = await _tokenStore.get("TENCENT_ACCESS_TOKEN");
+      if (stored) {
+        _cachedToken = stored;
+        return stored;
+      }
+    } catch (e) { /* fall through */ }
+  }
+  return _cachedToken || DEFAULT_ACCESS_TOKEN;
+}
+
+export async function saveAccessToken(token) {
+  _cachedToken = token;
+  if (_tokenStore) {
+    try {
+      await _tokenStore.put("TENCENT_ACCESS_TOKEN", token);
+    } catch (e) { console.error("[KV] save token error:", e.message); }
+  }
+}
+
+export function getDefaultAccessToken() {
+  return DEFAULT_ACCESS_TOKEN;
+}
 
 export function updateTokens(clientId, accessToken, openId) {
   if (clientId) CLIENT_ID = clientId;
-  if (accessToken) ACCESS_TOKEN = accessToken;
+  if (accessToken) _cachedToken = accessToken;
   if (openId) OPEN_ID = openId;
 }
 
-function getHeaders() {
+async function getHeaders() {
+  const token = await getAccessToken();
   return {
     "Content-Type": "application/json",
-    "Access-Token": ACCESS_TOKEN,
+    "Access-Token": token,
     "Open-Id": OPEN_ID,
     "Client-Id": CLIENT_ID
   };
@@ -33,7 +69,8 @@ function getHeaders() {
 
 async function apiGet(path) {
   const url = `${BASE_URL}${path}`;
-  const resp = await fetch(url, { headers: getHeaders(), signal: AbortSignal.timeout(8000) });
+  const headers = await getHeaders();
+  const resp = await fetch(url, { headers, signal: AbortSignal.timeout(8000) });
   if (!resp.ok) {
     console.log(`[TencentAPI] HTTP ${resp.status}: ${path}`);
     return null;
@@ -48,9 +85,10 @@ async function apiGet(path) {
 
 async function apiPost(path, body) {
   const url = `${BASE_URL}${path}`;
+  const headers = await getHeaders();
   const resp = await fetch(url, {
     method: 'POST',
-    headers: getHeaders(),
+    headers,
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(8000)
   });

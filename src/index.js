@@ -1,4 +1,5 @@
 // Main Worker entry point
+import { setTokenStore, saveAccessToken, getAccessToken, getDefaultAccessToken } from './tencent-api.js';
 import { handleAuthCheck, handleAuthLogin, handleAuthUsers } from './handlers/auth.js';
 import { handleModels } from './handlers/models.js';
 import { handleGetOrders, handleCreateOrder, handleGetOrder, handleUpdateOrder, handleDeleteOrder, handleCalculateDate, handleClearTempRow, handleCleanupTempRows, handleUpdatePassword } from './handlers/orders.js';
@@ -11,6 +12,11 @@ let preloaded = false;
 
 export default {
   async fetch(request, env, ctx) {
+    // Initialize KV token store
+    if (env.TOKEN_STORE) {
+      setTokenStore(env.TOKEN_STORE);
+    }
+
     const url = new URL(request.url);
     const path = url.pathname;
 

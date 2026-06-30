@@ -5,3 +5,7 @@ compatibility_flags = ["nodejs_compat"]
 
 [assets]
 directory = "./public"
+
+[[kv_namespaces]]
+binding = "TOKEN_STORE"
+id = "b688a7ae522b4a35802b0c03badb5491"
