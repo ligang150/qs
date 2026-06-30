@@ -1,0 +1,7 @@
+name = "qs"
+main = "src/index.js"
+compatibility_date = "2025-06-30"
+compatibility_flags = ["nodejs_compat"]
+
+[assets]
+directory = "./public"
