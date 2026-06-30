@@ -1396,6 +1396,10 @@ function renderAdminItems(items) {
             statusHtml = '<span class="admin-item-status ok">已配置</span>';
         }
         const mask = item.masked ? `当前：<span class="admin-item-mask">${item.masked}</span>` : '<span class="admin-item-mask">尚未保存</span>';
+        const isRenderOrGithub = (item.name === 'RENDER_API_KEY' || item.name === 'GITHUB_TOKEN');
+        const btnText = isRenderOrGithub ? '由主站管理' : '保存';
+        const btnDisabled = isRenderOrGithub ? 'disabled' : '';
+        const placeholder = isRenderOrGithub ? '此凭证由主 Render 服务管理' : `粘贴新的 ${label}，输入不会回显`;
         card.innerHTML = `
             <div class="admin-item-head">
                 <span class="admin-item-name">${label}</span>
@@ -1403,9 +1407,9 @@ function renderAdminItems(items) {
             </div>
             <div class="admin-item-mask" style="margin-bottom:8px;">${mask}</div>
             <div class="admin-item-row">
-                <input type="password" autocomplete="new-password" placeholder="粘贴新的 ${label}，输入不会回显" data-key="${item.name}" />
-                <button type="button" class="admin-btn-validate" data-action="validate">校验</button>
-                <button type="button" class="admin-btn-update" data-action="update">保存并部署</button>
+                <input type="password" autocomplete="new-password" placeholder="${placeholder}" data-key="${item.name}" ${btnDisabled} />
+                <button type="button" class="admin-btn-validate" data-action="validate" ${btnDisabled}>校验</button>
+                <button type="button" class="admin-btn-update" data-action="update" ${btnDisabled}>${btnText}</button>
             </div>
             <div class="admin-item-msg" data-msg></div>
         `;
@@ -1435,7 +1439,7 @@ async function onAdminValidate(key, input, msg) {
         const data = await r.json();
         if (data.success) {
             msg.className = 'admin-item-msg ok';
-            msg.textContent = '校验通过，可保存并部署';
+            msg.textContent = '校验通过，可保存';
         } else {
             msg.className = 'admin-item-msg err';
             msg.textContent = '校验失败：' + (data.error || '未知错误');
@@ -1453,9 +1457,9 @@ async function onAdminUpdate(key, input, msg) {
         msg.textContent = '请先粘贴新的值';
         return;
     }
-    if (!confirm(`确认更新「${ADMIN_KEY_LABELS[key] || key}」？\n将写入主服务 Render 环境变量，并触发重新部署。`)) return;
+    if (!confirm(`确认更新「${ADMIN_KEY_LABELS[key] || key}」？\n将保存到 Cloudflare 备份节点。`)) return;
     msg.className = 'admin-item-msg';
-    msg.textContent = '正在校验、保存并触发部署…';
+    msg.textContent = '正在保存…';
     try {
         const r = await apiFetch(`${API_BASE}/api/admin/update`, {
             method: 'POST',
@@ -1470,7 +1474,7 @@ async function onAdminUpdate(key, input, msg) {
             const log = document.getElementById('adminLog');
             const item = document.createElement('div');
             const t = new Date().toLocaleString();
-            item.textContent = `[${t}] ${ADMIN_KEY_LABELS[key] || key} 已更新（${data.log ? data.log.masked : ''}），已写入 Render 环境变量并触发部署`;
+            item.textContent = `[${t}] ${ADMIN_KEY_LABELS[key] || key} 已更新（${data.log ? data.log.masked : ''}），已保存到 Cloudflare 节点`;
             log.prepend(item);
             setTimeout(loadAdminStatus, 2000);
         } else {

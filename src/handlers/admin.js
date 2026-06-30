@@ -90,17 +90,25 @@ export async function handleAdminUpdate(request) {
 
   try {
     const data = await request.json();
-    const name = data.name || '';
+    const name = data.name || data.key || '';
     const value = data.value || '';
+
+    if (name === 'RENDER_API_KEY' || name === 'GITHUB_TOKEN') {
+      return jsonResponse({ success: false, error: "此凭证由主 Render 服务管理，Cloudflare 备份节点仅支持更新腾讯 access_token" });
+    }
 
     if (name === 'TENCENT_ACCESS_TOKEN') {
       updateTokens(null, value, null);
       clearCache();
-    } else if (name === 'CLIENT_ID') {
-      updateTokens(value, null, null);
+      return jsonResponse({ success: true, message: "腾讯 access_token 已保存到 Cloudflare 节点" });
     }
 
-    return jsonResponse({ success: true, message: `凭证 ${name} 已更新` });
+    if (name === 'CLIENT_ID') {
+      updateTokens(value, null, null);
+      return jsonResponse({ success: true, message: `凭证 ${name} 已更新` });
+    }
+
+    return jsonResponse({ success: false, error: "未知凭证类型" });
   } catch (e) {
     return jsonResponse({ success: false, error: e.message });
   }
