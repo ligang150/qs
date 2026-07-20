@@ -713,22 +713,29 @@ async function loadOrders(page = 1, forceRefresh = false, options = {}) {
         if (requestSeq !== ordersRequestSeq) return;
         if (data.success) {
             const newOrders = (data.orders || []).filter(order => !isRecentlyDeletedOrder(order));
+            // 日期过滤：期望发货日期或排队日期 >= 今天
+            const todayStr = new Date().toISOString().slice(0, 10);
+            const filtered = newOrders.filter(order => {
+                const ed = (order.expected_date || '').trim();
+                const qd = (order.queue_date || '').trim();
+                return (ed && ed >= todayStr) || (qd && qd >= todayStr);
+            });
             // 保存到对应viewMode的缓存（使用请求时的viewMode，不用后端返回值覆盖）
             const requestViewMode = viewMode;
             if (requestViewMode === 'mine') {
-                cachedMineOrders = newOrders;
+                cachedMineOrders = filtered;
             } else {
-                cachedAllOrders = newOrders;
+                cachedAllOrders = filtered;
             }
             // 如果API返回空但对应缓存有数据，使用对应缓存（降级显示）
             const cachedOrders = requestViewMode === 'mine' ? cachedMineOrders : cachedAllOrders;
-            if (newOrders.length === 0 && cachedOrders.length > 0) {
+            if (filtered.length === 0 && cachedOrders.length > 0) {
                 console.warn('[loadOrders] API返回空，使用' + viewMode + '缓存数据');
                 allOrders = cachedOrders;
                 renderOrders(allOrders);
                 return;
             }
-            allOrders = newOrders;
+            allOrders = filtered;
             currentPage = data.pagination?.page || 1;
             totalPages = data.pagination?.total_pages || 1;
             isAdmin = data.is_admin;
@@ -1710,9 +1717,14 @@ async function adminHealthCheck() {
             bar.style.display = 'none';
             return;
         }
-        const onlyWarn = (data.issues || []).every(i => i.level === 'warn');
+        const issues = data.issues || [];
+        if (issues.length === 0) {
+            bar.style.display = 'none';
+            return;
+        }
+        const onlyWarn = issues.every(i => i.level === 'warn');
         bar.className = 'admin-alert-bar' + (onlyWarn ? ' warn' : '');
-        const lis = (data.issues || []).map(i => `<li>${ADMIN_KEY_LABELS[i.key] || i.key}：${i.message}</li>`).join('');
+        const lis = issues.map(i => `<li>${ADMIN_KEY_LABELS[i.key] || i.key}：${i.message}</li>`).join('');
         bar.innerHTML = `<strong>${onlyWarn ? '提醒' : '凭证异常'}</strong><ul>${lis}</ul>`;
         bar.style.display = '';
     } catch (e) {
