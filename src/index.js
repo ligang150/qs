@@ -33,11 +33,11 @@ export default {
       });
     }
 
-    // Preload on first API request (non-blocking)
-    if (!preloaded && (path.startsWith('/api/') || path.startsWith('/auth/'))) {
-      preloaded = true;
-      ctx.waitUntil(preloadAllModels());
-    }
+    // Preload disabled: causes too many subrequests on Pages Functions
+    // if (!preloaded && (path.startsWith('/api/') || path.startsWith('/auth/'))) {
+    //   preloaded = true;
+    //   ctx.waitUntil(preloadAllModels());
+    // }
 
     // Route matching
     try {

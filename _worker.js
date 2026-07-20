@@ -815,26 +815,10 @@ async function calculateDeliveryDate(model, tonnageStr, expectedDateStr, origina
 function clearCache() {
   cache.clear();
 }
-async function preloadAllModels() {
-  const promises = Object.entries(MODEL_CONFIG).map(async ([model, config]) => {
-    try {
-      const [sheetId, startRow, capacityCol, limitCell, rowCount] = config;
-      await getSheetData(sheetId, startRow, capacityCol, limitCell, rowCount);
-      return { model, ok: true };
-    } catch (e) {
-      return { model, ok: false, error: e.message };
-    }
-  });
-  const results = await Promise.all(promises);
-  const ok = results.filter((r) => r.ok).length;
-  console.log(`[preload] ${ok}/${results.length} models preloaded`);
-  return { success: ok, total: results.length };
-}
 
 // src/handlers/orders.js
 init_tencent_api();
 init_utils();
-var PER_PAGE = 20;
 function parseOrderRow(rowData) {
   return {
     model: rowData[0] || "",
@@ -860,13 +844,20 @@ async function readAllOrders(forceRefresh = false) {
     return ordersCache;
   }
   const orders = [];
-  const batchSize = 200;
+  const batchSize = 500;
+  let emptyStreak = 0;
   for (let offset = 0; offset < 4e3; offset += batchSize) {
     const start = offset + 1;
     const end = offset + batchSize;
     const gridData = await readSheetRange(SHEET_ID, `A${start}:L${end}`);
     const rows = gridData.rows || [];
-    if (rows.length === 0) break;
+    if (rows.length === 0) {
+      emptyStreak++;
+      if (emptyStreak >= 2) break;
+      continue;
+    }
+    emptyStreak = 0;
+    let foundAny = false;
     for (let i = 0; i < rows.length; i++) {
       const actualRow = start + i;
       if (actualRow < 2) continue;
@@ -876,11 +867,15 @@ async function readAllOrders(forceRefresh = false) {
       const jVal = rowData[9] || "";
       if (!aVal) continue;
       if (jVal === "DELETED") continue;
+      foundAny = true;
       const order = parseOrderRow(rowData);
       order.row_index = actualRow;
       orders.push(order);
     }
-    if (rows.length < batchSize) break;
+    if (!foundAny) {
+      emptyStreak++;
+      if (emptyStreak >= 2) break;
+    }
   }
   ordersCache = orders;
   ordersCacheTime = now;
@@ -967,6 +962,11 @@ async function getNextEmptyRow(startFrom = 2, maxBatches = 50) {
   }
   return 0;
 }
+function normalizeViewMode(currentUser, requestedViewMode) {
+  const accessLevel = (currentUser || {}).access_level || "self";
+  if (requestedViewMode === "all") return "all";
+  return "mine";
+}
 async function handleGetOrders(request) {
   if (!requireAuth(request)) {
     return jsonResponse({ success: false, error: "\u672A\u6388\u6743", need_auth: true }, 401);
@@ -974,59 +974,99 @@ async function handleGetOrders(request) {
   try {
     const url = new URL(request.url);
     const page = parseInt(url.searchParams.get("page") || "1");
-    const filterModel = url.searchParams.get("model") || "";
-    const filterCustomer = url.searchParams.get("customer") || "";
-    const sortBy = url.searchParams.get("sort") || "";
+    const perPage = parseInt(url.searchParams.get("per_page") || "20");
+    const modelFilter = url.searchParams.get("model_filter") || "";
+    const customerFilter = url.searchParams.get("customer_filter") || "";
+    const sortType = url.searchParams.get("sort") || "";
     const submitterId = normalizeUserKey(request.headers.get("X-Employee-Id") || "");
-    const submitterName = request.headers.get("X-Employee-Name") || "";
-    const viewAll = url.searchParams.get("all") === "1";
+    const submitterName = url.searchParams.get("submitter_name") || "";
+    const requestedViewMode = url.searchParams.get("view_mode") || "mine";
+    const allUsers = await readUsers();
+    const userById = /* @__PURE__ */ new Map();
+    const userByName = /* @__PURE__ */ new Map();
+    for (const u of allUsers) {
+      userById.set(normalizeUserKey(u.employee_id), u);
+      userByName.set(String(u.name || "").trim(), u);
+    }
+    const getUserByIdCached = (id) => userById.get(normalizeUserKey(id)) || null;
+    const getUserByNameCached = (name) => userByName.get(String(name || "").trim()) || null;
+    const getOrderSubmitterCached = (order) => getUserByIdCached(order.submitter_id) || getUserByNameCached(order.submitter);
     const allOrders = await readAllOrders();
-    const currentUser = await getUserById(submitterId);
-    let visibleOrders;
-    if (viewAll && submitterId === ADMIN_EMPLOYEE_ID) {
-      visibleOrders = allOrders;
-    } else {
-      const accessLevel = (currentUser || {}).access_level || "self";
+    const currentUser = getUserByIdCached(submitterId);
+    const accessLevel = (currentUser || {}).access_level || "self";
+    const isAdmin = accessLevel === "admin";
+    const viewMode = normalizeViewMode(currentUser, requestedViewMode);
+    const visibleOrders = [];
+    const currentDept = String((currentUser || {}).department || "").trim();
+    for (const o of allOrders) {
+      if (viewMode === "mine") {
+        if (isSameSubmitter(o, submitterId, submitterName)) visibleOrders.push(o);
+        continue;
+      }
       if (accessLevel === "admin") {
-        visibleOrders = allOrders;
-      } else if (accessLevel === "department") {
-        const currentDept = String((currentUser || {}).department || "").trim();
-        if (!currentDept) {
-          visibleOrders = allOrders;
-        } else {
-          const results = [];
-          for (const o of allOrders) {
-            if (isSameSubmitter(o, submitterId, submitterName)) {
-              results.push(o);
-              continue;
-            }
-            const orderUser = await getOrderSubmitterUser(o);
-            const orderDept = String((orderUser || {}).department || "").trim();
-            if (currentDept === orderDept) results.push(o);
-          }
-          visibleOrders = results;
+        visibleOrders.push(o);
+        continue;
+      }
+      if (accessLevel === "department" || accessLevel === "self") {
+        if (isSameSubmitter(o, submitterId, submitterName)) {
+          visibleOrders.push(o);
+          continue;
         }
-      } else {
-        visibleOrders = allOrders.filter((o) => isSameSubmitter(o, submitterId, submitterName));
+        if (!currentDept) {
+          visibleOrders.push(o);
+          continue;
+        }
+        const orderUser = getOrderSubmitterCached(o);
+        const orderDept = String((orderUser || {}).department || "").trim();
+        if (currentDept && orderDept && currentDept === orderDept) {
+          visibleOrders.push(o);
+        }
       }
     }
-    if (filterModel) visibleOrders = visibleOrders.filter((o) => o.model === filterModel);
-    if (filterCustomer) visibleOrders = visibleOrders.filter((o) => o.customer && o.customer.includes(filterCustomer));
-    if (sortBy === "model") visibleOrders.sort((a, b) => (a.model || "").localeCompare(b.model || ""));
-    else if (sortBy === "queueDate") visibleOrders.sort((a, b) => (b.queue_date || "").localeCompare(a.queue_date || ""));
-    else if (sortBy === "tonnage") visibleOrders.sort((a, b) => (parseFloat(b.tonnage) || 0) - (parseFloat(a.tonnage) || 0));
+    if (modelFilter) {
+      for (let i = visibleOrders.length - 1; i >= 0; i--) {
+        if (visibleOrders[i].model !== modelFilter) visibleOrders.splice(i, 1);
+      }
+    }
+    if (customerFilter) {
+      const lowerFilter = customerFilter.toLowerCase();
+      for (let i = visibleOrders.length - 1; i >= 0; i--) {
+        const customer = String(visibleOrders[i].customer || "").toLowerCase();
+        if (!customer.includes(lowerFilter)) visibleOrders.splice(i, 1);
+      }
+    }
+    if (sortType) {
+      visibleOrders.sort((a, b) => {
+        if (sortType === "model") return (a.model || "").localeCompare(b.model || "");
+        if (sortType === "queueDate") return (b.queue_date || "9999-12-31").localeCompare(a.queue_date || "9999-12-31");
+        if (sortType === "tonnage") {
+          const ta = parseFloat(a.tonnage) || 0;
+          const tb = parseFloat(b.tonnage) || 0;
+          return tb - ta;
+        }
+        return 0;
+      });
+    }
     const total = visibleOrders.length;
-    const totalPages = Math.ceil(total / PER_PAGE) || 1;
+    const safePerPage = Math.max(1, Math.min(perPage, 100));
+    const totalPages = Math.ceil(total / safePerPage) || 1;
     const p = Math.max(1, Math.min(page, totalPages));
-    const offset = (p - 1) * PER_PAGE;
-    const pageOrders = visibleOrders.slice(offset, offset + PER_PAGE);
+    const startIdx = (p - 1) * safePerPage;
+    const endIdx = startIdx + safePerPage;
+    const paginatedOrders = visibleOrders.slice(startIdx, endIdx);
     return jsonResponse({
       success: true,
-      orders: pageOrders,
-      total,
-      page: p,
-      total_pages: totalPages,
-      per_page: PER_PAGE
+      orders: paginatedOrders,
+      is_admin: isAdmin,
+      access_level: (currentUser || {}).access_level || "self",
+      department: (currentUser || {}).department || "",
+      view_mode: viewMode,
+      pagination: {
+        page: p,
+        per_page: safePerPage,
+        total,
+        total_pages: totalPages
+      }
     });
   } catch (e) {
     return jsonResponse({ success: false, error: e.message });
@@ -1560,7 +1600,6 @@ async function handleAdminModelConfigsPost(request) {
 
 // src/index.js
 init_utils();
-var preloaded = false;
 var index_default = {
   async fetch(request, env, ctx) {
     if (env.TOKEN_STORE) {
@@ -1578,10 +1617,6 @@ var index_default = {
           "Access-Control-Max-Age": "86400"
         }
       });
-    }
-    if (!preloaded && (path.startsWith("/api/") || path.startsWith("/auth/"))) {
-      preloaded = true;
-      ctx.waitUntil(preloadAllModels());
     }
     try {
       if (path === "/auth/check" && request.method === "GET") return handleAuthCheck(request);
