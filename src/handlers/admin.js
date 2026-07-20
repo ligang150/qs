@@ -75,14 +75,23 @@ export async function handleAdminStatus(request) {
     is_default_token: isDefault,
     service: "Cloudflare Worker",
     mode: "backup",
-    version: "cf-v1.0"
+    version: "cf-v2.0"
   });
 }
 
 export async function handleAdminValidate(request) {
   if (!requireAdmin(request)) return jsonResponse({ success: false, error: "无管理员权限" }, 403);
-  // Simplified - just return ok
-  return jsonResponse({ success: true, validated: true });
+  try {
+    const token = await getAccessToken();
+    const defaultToken = getDefaultAccessToken();
+    const isDefault = token === defaultToken;
+    const exp = decodeJwtExpiry(token);
+    const now = Math.floor(Date.now() / 1000);
+    const valid = exp > now;
+    return jsonResponse({ success: true, validated: valid, is_default: isDefault, remaining_seconds: exp > now ? exp - now : 0 });
+  } catch (e) {
+    return jsonResponse({ success: false, error: e.message });
+  }
 }
 
 export async function handleAdminDeploy(request) {
@@ -121,7 +130,28 @@ export async function handleAdminUpdate(request) {
 }
 
 export async function handleAdminHealth(request) {
-  return jsonResponse({ success: true, status: "ok", service: "cloudflare-worker" });
+  if (!requireAdmin(request)) return jsonResponse({ success: false, error: "无管理员权限" }, 403);
+  try {
+    const token = await getAccessToken();
+    const resp = await fetch("https://docs.qq.com/openapi/spreadsheet/v3/files/DRnhDemRIS25mdnFF", {
+      headers: {
+        "Access-Token": token,
+        "Open-Id": "9bc172e5338147d8a35c1438ea8d1577",
+        "Client-Id": "da815d1227294457b43413bdc16e3e90"
+      },
+      signal: AbortSignal.timeout(8000)
+    });
+    const data = resp.ok ? await resp.json().catch(() => null) : null;
+    return jsonResponse({
+      success: true,
+      status: resp.ok && data && !data.code ? "ok" : "error",
+      http_status: resp.status,
+      api_code: data?.code || null,
+      service: "cloudflare-worker"
+    });
+  } catch (e) {
+    return jsonResponse({ success: false, status: "error", error: e.message });
+  }
 }
 
 export async function handleDebugCapacity(request) {

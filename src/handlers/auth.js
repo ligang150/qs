@@ -1,4 +1,4 @@
-// Auth handlers
+// Auth handlers - synced with Flask app.py
 import { readUsers } from '../tencent-api.js';
 import { jsonResponse, normalizeUserKey, ADMIN_EMPLOYEE_ID } from '../utils.js';
 
@@ -21,7 +21,12 @@ export async function handleAuthLogin(request) {
         if (user.password === password) {
           return jsonResponse({
             success: true,
-            user: { name: user.name, employee_id: user.employee_id },
+            user: {
+              name: user.name,
+              employee_id: user.employee_id,
+              access_level: user.access_level || "self",
+              department: user.department || ""
+            },
             access_password: ACCESS_PASSWORD
           });
         }

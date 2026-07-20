@@ -7,11 +7,11 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>销售排队系统</title>
-    <link rel="stylesheet" href="/static/css/style.css?v=54">
+    <link rel="stylesheet" href="/static/css/style.css?v=57">
     <script>
-        // Version check - auto refresh when new version deployed
+        // 版本检查：如果服务器版本更新，自动刷新页面
         (function(){
-            var serverVersion = 54;
+            var serverVersion = 57;
             var localVersion = parseInt(localStorage.getItem('app_version') || '0');
             if (localVersion && localVersion < serverVersion) {
                 localStorage.setItem('app_version', serverVersion);
@@ -25,7 +25,7 @@
 <body>
     <div id="authOverlay" class="auth-overlay" style="display:none;">
         <div class="auth-box">
-            <div class="auth-icon">&#128274;</div>
+            <div class="auth-icon">🔒</div>
             <h2>需要授权访问</h2>
             <p>本系统仅限授权用户使用</p>
             <div class="auth-form">
@@ -152,6 +152,8 @@
                 <div id="adminItems" class="admin-items"></div>
                 <div id="adminLog" class="admin-log"></div>
             </div>
+
+
         </div>
     </div>
 

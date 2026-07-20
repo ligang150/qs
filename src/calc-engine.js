@@ -112,9 +112,9 @@ async function getModelConfig(model) {
   return sheetConfigs[model] || null;
 }
 
-export async function calculateDeliveryDate(model, tonnageStr, expectedDateStr) {
-  // Check cache
-  const cacheKey = `calc:${model}:${tonnageStr}:${expectedDateStr}`;
+export async function calculateDeliveryDate(model, tonnageStr, expectedDateStr, originalQueueDateStr = null, originalTonnageStr = null) {
+  // Check cache (no cache when compensation params are provided)
+  const cacheKey = `calc:${model}:${tonnageStr}:${expectedDateStr}:${originalQueueDateStr || ''}:${originalTonnageStr || ''}`;
   const cached = getCached(cacheKey);
   if (cached) return cached;
 
@@ -130,11 +130,36 @@ export async function calculateDeliveryDate(model, tonnageStr, expectedDateStr) 
   const [sheetId, startRow, capacityCol, limitCell, rowCount] = config;
 
   const sheetData = await getSheetData(sheetId, startRow, capacityCol, limitCell, rowCount);
-  const { dateCapacityMap, limitDate, sortedDates, capacities } = sheetData;
+  const { dateCapacityMap, limitDate, sortedDates, capacities: origCapacities } = sheetData;
 
   if (!sortedDates || sortedDates.length === 0) {
     return ["请联系商务支持", "排产数据读取失败，请稍后重试或联系管理员检查Token"];
   }
+
+  // ========== 修改排队时的产能补偿逻辑 ==========
+  // 如果有原排队日期和原吨位，将原排队日期及之后每天的产能加上原吨位
+  let capacities = origCapacities;
+  const originalQueueDate = originalQueueDateStr ? parseDate(originalQueueDateStr) : null;
+  const originalTonnage = originalTonnageStr ? parseNumber(originalTonnageStr) : null;
+
+  if (originalQueueDate && originalTonnage && originalTonnage > 0) {
+    capacities = [...origCapacities]; // copy, don't mutate cache
+    const effectiveLimitDate = limitDate || sortedDates[sortedDates.length - 1];
+    // Find index of original queue date
+    let origIdx = 0;
+    for (; origIdx < sortedDates.length; origIdx++) {
+      if (sortedDates[origIdx] >= originalQueueDate) break;
+    }
+    // Find index of limit date
+    let limitIdx = sortedDates.length - 1;
+    for (let k = sortedDates.length - 1; k >= 0; k--) {
+      if (sortedDates[k] <= effectiveLimitDate) { limitIdx = k; break; }
+    }
+    for (let k = origIdx; k <= Math.min(limitIdx, capacities.length - 1); k++) {
+      capacities[k] += originalTonnage;
+    }
+  }
+  // ===========================================
 
   const effectiveLimitDate = limitDate || sortedDates[sortedDates.length - 1];
 

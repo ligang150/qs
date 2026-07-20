@@ -1,4 +1,4 @@
-let currentUser = { name: '用户', id: '' };
+﻿let currentUser = { name: '用户', id: '' };
 let allOrders = [];
 let cachedMineOrders = [];  // 我的排队缓存
 let cachedAllOrders = [];   // 全部排队缓存
@@ -7,6 +7,8 @@ let pendingRowIndex = 0;
 let currentPage = 1;
 let totalPages = 1;
 let isAdmin = false;
+let isManager = false;
+let accessLevel = 'self';
 let viewMode = 'mine'; // 'mine' 或 'all'
 let listenersInitialized = false;
 let ordersDirty = true;
@@ -25,6 +27,18 @@ const ADMIN_KEY_LABELS = {
     RENDER_API_KEY: 'Render API Key',
     GITHUB_TOKEN: 'GitHub Token'
 };
+
+// 计算北京时间次日日期字符串（YYYY-MM-DD）
+function getBeijingTomorrow() {
+    const now = new Date();
+    const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+    const beijing = new Date(utc + 8 * 3600000);
+    beijing.setDate(beijing.getDate() + 1);
+    const y = beijing.getFullYear();
+    const m = String(beijing.getMonth() + 1).padStart(2, '0');
+    const d = String(beijing.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+}
 
 // 从localStorage读取密码、员工ID和用户名
 let accessPassword = localStorage.getItem('accessPassword') || '';
@@ -103,16 +117,27 @@ document.addEventListener('DOMContentLoaded', function() {
 function showAuthOverlay(errorMsg) {
     document.getElementById('authOverlay').style.display = 'flex';
     if (errorMsg) document.getElementById('authError').textContent = errorMsg;
+    loadAuthUsers();
 }
 
 function hideAuthOverlay() {
     document.getElementById('authOverlay').style.display = 'none';
 }
 
+async function loadAuthUsers() {
+    // 员工号输入模式下，不需要加载下拉列表
+    // 仅预取用户列表用于后续验证
+    try {
+        await fetch(`${API_BASE}/auth/users`);
+    } catch (error) {
+        console.error('预取用户列表失败', error);
+    }
+}
+
 async function doAuth() {
-    const employeeIdInput = document.getElementById('authUserInput').value.trim();
+    const inputEmployeeId = document.getElementById('authUserInput').value.trim();
     const password = document.getElementById('authPassword').value.trim();
-    if (!employeeIdInput) {
+    if (!inputEmployeeId) {
         document.getElementById('authError').textContent = '请输入员工号';
         return;
     }
@@ -120,23 +145,38 @@ async function doAuth() {
         document.getElementById('authError').textContent = '请输入密码';
         return;
     }
+    // 先验证员工号是否存在
+    try {
+        const usersResp = await fetch(`${API_BASE}/auth/users`);
+        const usersData = await usersResp.json();
+        if (usersData.success && Array.isArray(usersData.users)) {
+            const found = usersData.users.some(u => String(u.employee_id) === inputEmployeeId);
+            if (!found) {
+                document.getElementById('authError').textContent = '员工号不存在';
+                return;
+            }
+        }
+    } catch (error) {
+        // 验证失败不阻断，继续尝试登录
+        console.error('验证员工号失败', error);
+    }
     try {
         const response = await fetch(`${API_BASE}/auth/login`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ employee_id: employeeIdInput, password })
+            body: JSON.stringify({ employee_id: inputEmployeeId, password })
         });
         const data = await response.json();
         if (data.success) {
-            console.log('[doAuth] employeeIdInput=', employeeIdInput, 'before: employeeId=', employeeId, 'currentUser.id=', currentUser.id);
+            console.log('[doAuth] inputEmployeeId=', inputEmployeeId, 'before: employeeId=', employeeId, 'currentUser.id=', currentUser.id);
             accessPassword = data.access_password || '';
-            employeeId = employeeIdInput;
+            employeeId = inputEmployeeId;
             const name = data.user?.name || '用户';
             localStorage.setItem('accessPassword', accessPassword);
-            localStorage.setItem('employeeId', employeeIdInput);
+            localStorage.setItem('employeeId', inputEmployeeId);
             localStorage.setItem('userName', name);
             currentUser.name = name;
-            currentUser.id = employeeIdInput;
+            currentUser.id = inputEmployeeId;
             console.log('[doAuth] after: employeeId=', employeeId, 'currentUser.id=', currentUser.id);
             hideAuthOverlay();
             initApp();
@@ -167,15 +207,19 @@ function initApp() {
     document.getElementById('customer').value = '';
     document.getElementById('calculatedDate').value = '';
     pendingRowIndex = 0;
-    // 期望发货日期默认为次日
-    const tomorrow = new Date();
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    const tomorrowStr = tomorrow.toISOString().split('T')[0];
-    document.getElementById('expectedDate').value = tomorrowStr;
-    document.getElementById('queueDate').value = tomorrowStr;
+    // 期望发货日期默认为次日（北京时间）
+    document.getElementById('expectedDate').value = getBeijingTomorrow();
+    document.getElementById('queueDate').value = '';
+    // queueDate 初始为禁用，等 calculatedDate 计算完成后才可编辑
+    const queueDateInput = document.getElementById('queueDate');
+    queueDateInput.disabled = true;
+    queueDateInput.placeholder = '请先选择型号和吨位计算可发货日期';
+    queueDateInput.style.cursor = 'not-allowed';
+    queueDateInput.style.background = '#e9ecef';
     // 绑定事件监听器
     setupEventListeners();
     setupEditQueueDateListener();
+    setupTabSwitchCleanup();
     // 启动无操作检测
     startIdleTimer();
     // 登录后空闲时预取排队明细，用户首次点开更快；不阻塞首屏表单
@@ -356,7 +400,9 @@ function setupModelSearch() {
         input.value = modelName;
         hidden.value = modelName;
         closeDropdown();
+        // 同时触发modelInput和hidden model的change事件，确保calculateDate能获取最新型号
         input.dispatchEvent(new Event('change', { bubbles: true }));
+        hidden.dispatchEvent(new Event('change', { bubbles: true }));
     }
 
     function closeDropdown() {
@@ -401,24 +447,33 @@ function setupEventListeners() {
     ['click', 'keydown', 'scroll', 'touchstart'].forEach(evt => {
         document.addEventListener(evt, recordActivity, { passive: true });
     });
-    // 创建页面自动计算
-    const calcFields = ['model', 'tonnage', 'customer', 'expectedDate'];
-    calcFields.forEach(fieldId => {
+    // 创建页面自动计算：型号/customer用change，吨位/期望日期用input+change实现即时触发
+    const calcFieldsChange = ['model', 'customer'];
+    calcFieldsChange.forEach(fieldId => {
         const field = document.getElementById(fieldId);
         if (field) {
-            field.addEventListener('change', debounce(calculateDate, 300));
+            field.addEventListener('change', debounce(calculateDate, 150));
+        }
+    });
+    const calcFieldsInput = ['tonnage', 'expectedDate'];
+    calcFieldsInput.forEach(fieldId => {
+        const field = document.getElementById(fieldId);
+        if (field) {
+            field.addEventListener('input', debounce(calculateDate, 150));
+            // 日期选择器在某些浏览器中只触发change不触发input，同时监听两者
+            field.addEventListener('change', debounce(calculateDate, 150));
         }
     });
     const calcModelInput = document.getElementById('modelInput');
     if (calcModelInput) {
-        calcModelInput.addEventListener('change', debounce(calculateDate, 300));
+        calcModelInput.addEventListener('change', debounce(calculateDate, 150));
     }
     // 修改页面自动计算
     const editCalcFields = ['editModel', 'editTonnage', 'editCustomer', 'editExpectedDate'];
     editCalcFields.forEach(fieldId => {
         const field = document.getElementById(fieldId);
         if (field) {
-            field.addEventListener('change', debounce(calculateDateForEdit, 300));
+            field.addEventListener('change', debounce(calculateDateForEdit, 150));
         }
     });
 }
@@ -453,13 +508,23 @@ async function calculateDate() {
         return;
     }
 
+    // 计算开始时，清空可发货日期和输入发货日期排队
     document.getElementById('calculatedDate').value = '计算中...';
+    const queueDateInput = document.getElementById('queueDate');
+    queueDateInput.value = '';
+    queueDateInput.disabled = true;
+    queueDateInput.style.background = '#e9ecef';
+    queueDateInput.style.cursor = 'not-allowed';
+    queueDateInput.placeholder = '计算中...';
+    // 清除之前的提示
+    const oldHint = queueDateInput.parentNode.querySelector('.queue-date-hint');
+    if (oldHint) oldHint.remove();
 
     try {
         const response = await apiFetch(`${API_BASE}/api/calculate-date`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model, tonnage, customer, expected_date: expectedDate, pending_row_index: pendingRowIndex, submitter_id: currentUser.id })
+            body: JSON.stringify({ model, tonnage, customer, expected_date: expectedDate, pending_row_index: pendingRowIndex, submitter_id: currentUser.id, force_refresh: false })
         });
         const data = await response.json();
         
@@ -476,39 +541,49 @@ async function calculateDate() {
 
             // 检查E列结果是否为有效日期
             const isDate = calcDate && calcDate.match(/\d{4}-\d{2}-\d{2}/);
-            const queueDateInput = document.getElementById('queueDate');
             if (!isDate && calcDate) {
-                // 不隐藏queueDate输入框，保留让用户手动输入排队日期
                 queueDateInput.style.display = '';
-                queueDateInput.disabled = false;
-                queueDateInput.style.background = '';
+                queueDateInput.disabled = true;
+                queueDateInput.style.background = '#e9ecef';
                 queueDateInput.style.color = '';
-                // 显示提示信息
+                queueDateInput.style.cursor = 'not-allowed';
+                queueDateInput.placeholder = '产能不足，请联系商务支持';
+                queueDateInput.value = '';
                 const parent = queueDateInput.parentNode;
-                const oldHint = parent.querySelector('.queue-date-hint');
-                if (oldHint) oldHint.remove();
+                const oldHint2 = parent.querySelector('.queue-date-hint');
+                if (oldHint2) oldHint2.remove();
                 const hint = document.createElement('div');
                 hint.className = 'queue-date-hint';
                 hint.textContent = calcDate;
-                hint.style.cssText = 'width:100%;padding:6px 15px;font-size:13px;color:#e74c3c;font-weight:500;margin-bottom:4px;';
-                parent.insertBefore(hint, queueDateInput);
+                hint.style.cssText = 'font-size:13px;color:#e74c3c;margin-top:4px;font-weight:500;';
+                parent.insertBefore(hint, queueDateInput.nextSibling);
             } else if (isDate) {
                 queueDateInput.style.display = '';
                 queueDateInput.disabled = false;
-                queueDateInput.style.background = '';
+                queueDateInput.style.background = '#fff';
                 queueDateInput.style.color = '';
+                queueDateInput.style.cursor = 'text';
+                queueDateInput.placeholder = '点击选择日期';
                 queueDateInput.value = calcDate;
-                const oldHint = queueDateInput.parentNode.querySelector('.queue-date-hint');
-                if (oldHint) oldHint.remove();
+                const oldHint2 = queueDateInput.parentNode.querySelector('.queue-date-hint');
+                if (oldHint2) oldHint2.remove();
             } else {
                 queueDateInput.style.display = '';
                 queueDateInput.disabled = false;
-                const oldHint = queueDateInput.parentNode.querySelector('.queue-date-hint');
-                if (oldHint) oldHint.remove();
+                queueDateInput.style.background = '#fff';
+                queueDateInput.style.cursor = 'text';
+                queueDateInput.placeholder = '点击选择日期';
+                const oldHint2 = queueDateInput.parentNode.querySelector('.queue-date-hint');
+                if (oldHint2) oldHint2.remove();
             }
         } else {
-            document.getElementById('calculatedDate').value = '计算失败';
+            const errMsg = data.error || '计算失败';
+            document.getElementById('calculatedDate').value = errMsg;
             pendingRowIndex = 0;
+            queueDateInput.disabled = true;
+            queueDateInput.style.background = '#e9ecef';
+            queueDateInput.style.cursor = 'not-allowed';
+            queueDateInput.placeholder = errMsg;
         }
     } catch (error) {
         if (myVersion !== calcVersion) {
@@ -517,6 +592,10 @@ async function calculateDate() {
         }
         document.getElementById('calculatedDate').value = '计算失败';
         pendingRowIndex = 0;
+        queueDateInput.disabled = true;
+        queueDateInput.style.background = '#e9ecef';
+        queueDateInput.style.cursor = 'not-allowed';
+        queueDateInput.placeholder = '计算失败，请重试';
     }
     pendingCalcs--;
 }
@@ -537,27 +616,26 @@ async function handleCreateOrder(e) {
     let queueDate = '';
     const isCalcDate = calculatedDate && calculatedDate.match(/\d{4}-\d{2}-\d{2}/);
     
-    if (!isCalcDate && calculatedDate && calculatedDate !== '计算中...') {
-        // E列不是有效日期（如"请联系商务支持"），使用用户在F列手动输入的值
-        queueDate = queueDateInput.value;
-    } else {
+    if (isCalcDate) {
         // E列是有效日期，使用F列输入框的值
         queueDate = queueDateInput.value;
+    } else {
+        // 无有效可发货日期（如"请联系商务支持"），排队日期留空，允许提交
+        queueDate = '';
     }
     
-    // 校验：F列（排队日期）必须 >= E列（可发货日期）
-    if (isCalcDate && queueDate) {
+    // 有有效可发货日期时才校验排队日期
+    if (isCalcDate) {
+        if (!queueDate) {
+            showToast('请填写排队日期', 'error');
+            return;
+        }
         const calcDateObj = new Date(calculatedDate);
         const queueDateObj = new Date(queueDate);
         if (queueDateObj < calcDateObj) {
             showToast('排队日期不能早于可发货日期（' + calculatedDate + '）', 'error');
             return;
         }
-    }
-    
-    if (!queueDate) {
-        showToast('请填写排队日期', 'error');
-        return;
     }
     
     const orderData = {
@@ -568,7 +646,7 @@ async function handleCreateOrder(e) {
         queue_date: queueDate,
         submitter: currentUser.name,
         submitter_id: currentUser.id,
-        row_index: pendingRowIndex // 如果有预计算行号，则更新该行
+        row_index: pendingRowIndex // 使用calculate-date阶段确定的行号
     };
 
     try {
@@ -587,12 +665,13 @@ async function handleCreateOrder(e) {
             document.getElementById('model').value = '';
             const mi = document.getElementById('modelInput');
             if (mi) mi.value = '';
-            // 重置为次日
-            const tomorrow = new Date();
-            tomorrow.setDate(tomorrow.getDate() + 1);
-            const tomorrowStr = tomorrow.toISOString().split('T')[0];
-            document.getElementById('expectedDate').value = tomorrowStr;
-            document.getElementById('queueDate').value = tomorrowStr;
+            // 重置为次日（北京时间）
+            document.getElementById('expectedDate').value = getBeijingTomorrow();
+            document.getElementById('queueDate').value = '';
+            document.getElementById('queueDate').disabled = true;
+            document.getElementById('queueDate').placeholder = '请先选择型号和吨位计算可发货日期';
+            document.getElementById('queueDate').style.cursor = 'not-allowed';
+            document.getElementById('queueDate').style.background = '#e9ecef';
             document.getElementById('calculatedDate').value = '';
             pendingRowIndex = 0; // 清空
             draftQueue = null; // 清除草稿
@@ -634,14 +713,15 @@ async function loadOrders(page = 1, forceRefresh = false, options = {}) {
         if (requestSeq !== ordersRequestSeq) return;
         if (data.success) {
             const newOrders = (data.orders || []).filter(order => !isRecentlyDeletedOrder(order));
-            // 保存到对应viewMode的缓存
-            if (viewMode === 'mine') {
+            // 保存到对应viewMode的缓存（使用请求时的viewMode，不用后端返回值覆盖）
+            const requestViewMode = viewMode;
+            if (requestViewMode === 'mine') {
                 cachedMineOrders = newOrders;
             } else {
                 cachedAllOrders = newOrders;
             }
             // 如果API返回空但对应缓存有数据，使用对应缓存（降级显示）
-            const cachedOrders = viewMode === 'mine' ? cachedMineOrders : cachedAllOrders;
+            const cachedOrders = requestViewMode === 'mine' ? cachedMineOrders : cachedAllOrders;
             if (newOrders.length === 0 && cachedOrders.length > 0) {
                 console.warn('[loadOrders] API返回空，使用' + viewMode + '缓存数据');
                 allOrders = cachedOrders;
@@ -652,7 +732,10 @@ async function loadOrders(page = 1, forceRefresh = false, options = {}) {
             currentPage = data.pagination?.page || 1;
             totalPages = data.pagination?.total_pages || 1;
             isAdmin = data.is_admin;
-            viewMode = data.view_mode;
+            isManager = data.access_level === 'department';
+            accessLevel = data.access_level || 'self';
+            // 注意：不覆盖 viewMode，保持前端用户选择
+            // viewMode = data.view_mode;
             renderOrders(allOrders);
             renderPagination();
             renderAdminFilter();
@@ -747,14 +830,19 @@ function renderOrders(orders) {
         return;
     }
 
+    // 权限判断：业务员（非管理员非经理）在全部排队隐藏客户+禁止操作
+    const canSeeCustomer = viewMode === 'mine' || isAdmin || isManager;
+    const canOperate = viewMode === 'mine' || isAdmin || isManager;
+
     let html = `<table class="order-table">
         <thead>
             <tr>
                 <th>型号</th>
                 <th>吨位</th>
-                <th>客户</th>
+                ${canSeeCustomer ? '<th>客户</th>' : ''}
+                ${viewMode === 'all' ? '<th>业务员</th>' : ''}
                 <th>排队日期</th>
-                <th>操作</th>
+                ${canOperate ? '<th>操作</th>' : ''}
             </tr>
         </thead>
         <tbody>`;
@@ -770,13 +858,14 @@ function renderOrders(orders) {
         html += `<tr>
             <td class="td-model">${escapeHtml(order.model)}</td>
             <td>${escapeHtml(order.tonnage)}</td>
-            <td>${escapeHtml(order.customer)}</td>
+            ${canSeeCustomer ? '<td>' + escapeHtml(order.customer) + '</td>' : ''}
+            ${viewMode === 'all' ? '<td>' + escapeHtml(order.submitter || '') + '</td>' : ''}
             <td>${queueDateDisplay}</td>
-            <td class="td-actions">
+            ${canOperate ? `<td class="td-actions">
                 <button class="btn-edit" onclick="openEditModal(${order.row_index})">改</button>
                 <button class="btn-copy" onclick="copyOrder(${order.row_index})">复</button>
                 <button class="btn-delete" onclick="deleteOrder(${order.row_index})">删</button>
-            </td>
+            </td>` : ''}
         </tr>`;
     });
 
@@ -871,6 +960,9 @@ async function openEditModal(rowIndex) {
                 document.getElementById('editExpectedDate').value = order.expected_date || '';
                 document.getElementById('editCalculatedDate').value = order.calculated_date || '';
                 document.getElementById('editQueueDate').value = order.queue_date || '';
+                // 保存原始排队日期和吨位，用于修改排队时的产能补偿计算
+                window._editOriginalQueueDate = order.queue_date || '';
+                window._editOriginalTonnage = order.tonnage || '';
                 // 清除提示
                 document.getElementById('editDateHint').textContent = '';
                 document.getElementById('editDateHint').style.color = '';
@@ -878,18 +970,20 @@ async function openEditModal(rowIndex) {
                 const calcDate = order.calculated_date || '';
                 const isDate = calcDate && calcDate.match(/^\d{4}-\d{2}-\d{2}$/);
                 const editQueueDateInput = document.getElementById('editQueueDate');
-                if (!isDate) {
+                if (!isDate && calcDate !== '') {
                     editQueueDateInput.disabled = true;
                     editQueueDateInput.style.background = '#e9ecef';
                     editQueueDateInput.style.cursor = 'not-allowed';
-                    editQueueDateInput.title = '可发货日期无效，无法编辑排队日期';
-                } else {
+                    editQueueDateInput.title = '产能不足，请联系商务支持';
+                    editQueueDateInput.placeholder = '产能不足，请联系商务支持';
+                } else if (isDate) {
                     editQueueDateInput.disabled = false;
                     editQueueDateInput.style.background = '#fff';
                     editQueueDateInput.style.cursor = 'pointer';
                     editQueueDateInput.title = '';
                 }
                 document.getElementById('editModal').classList.add('show');
+                calculateDateForEdit();
             }
         }
     } catch (error) {
@@ -1143,12 +1237,21 @@ async function calculateDateForEdit() {
     document.getElementById('editCalculatedDate').value = '计算中...';
 
     const rowIndex = parseInt(document.getElementById('editRowIndex').value) || 0;
+    // 修改排队时的产能补偿：传递原排队日期和原吨位
+    const originalQueueDate = window._editOriginalQueueDate || '';
+    const originalTonnage = window._editOriginalTonnage || '';
 
     try {
+        const requestBody = { model, tonnage, customer, expected_date: expectedDate, pending_row_index: rowIndex };
+        // 只有当原排队日期是有效日期格式时才传递（表示该订单之前已经排过队）
+        if (originalQueueDate && originalQueueDate.match(/^\d{4}-\d{2}-\d{2}$/) && originalTonnage) {
+            requestBody.original_queue_date = originalQueueDate;
+            requestBody.original_tonnage = originalTonnage;
+        }
         const response = await apiFetch(`${API_BASE}/api/calculate-date`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model, tonnage, customer, expected_date: expectedDate, pending_row_index: rowIndex })
+            body: JSON.stringify(requestBody)
         });
         const data = await response.json();
         if (data.success) {
@@ -1156,12 +1259,34 @@ async function calculateDateForEdit() {
             document.getElementById('editCalculatedDate').value = calcDate || '计算失败';
 
             const isDate = calcDate && calcDate.match(/\d{4}-\d{2}-\d{2}/);
+            document.getElementById('editQueueDate').disabled = false;
+            document.getElementById('editQueueDate').style.background = '#fff';
+            document.getElementById('editQueueDate').style.cursor = 'pointer';
+            var editSubmitBtn = document.querySelector('#editForm .btn-submit');
             if (isDate) {
-                document.getElementById('editQueueDate').value = calcDate;
+                document.getElementById('editQueueDate').placeholder = '点击选择日期，须大于等于可发货日期';
                 document.getElementById('editDateHint').textContent = '';
+                if (editSubmitBtn) { editSubmitBtn.disabled = false; editSubmitBtn.title = ''; }
+            } else if (calcDate) {
+                document.getElementById('editQueueDate').disabled = true;
+                document.getElementById('editQueueDate').style.background = '#e9ecef';
+                document.getElementById('editQueueDate').style.cursor = 'not-allowed';
+                document.getElementById('editQueueDate').placeholder = '产能不足，请联系商务支持';
+                document.getElementById('editDateHint').textContent = calcDate;
+                if (editSubmitBtn) { editSubmitBtn.disabled = false; editSubmitBtn.title = ''; }
+            }
+            var currentQueueDate = document.getElementById('editQueueDate').value;
+            if (isDate && currentQueueDate) {
+                if (new Date(currentQueueDate) < new Date(calcDate)) {
+                    document.getElementById('editDateHint').textContent = '排队日期不能早于可发货日期（' + calcDate + '）';
+                    document.getElementById('editDateHint').style.color = '#e74c3c';
+                } else {
+                    document.getElementById('editDateHint').textContent = '';
+                    document.getElementById('editDateHint').style.color = '';
+                }
             }
         } else {
-            document.getElementById('editCalculatedDate').value = '计算失败';
+            document.getElementById('editCalculatedDate').value = data.error || '计算失败';
         }
     } catch (error) {
         document.getElementById('editCalculatedDate').value = '计算失败';
@@ -1178,15 +1303,21 @@ function setupEditQueueDateListener() {
             const hint = document.getElementById('editDateHint');
             if (calcDate && calcDate.match(/\d{4}-\d{2}-\d{2}/) && queueDate) {
                 if (new Date(queueDate) < new Date(calcDate)) {
-                    hint.textContent = '排队日期不能早于可发货日期';
+                    hint.textContent = '排队日期不能早于可发货日期（' + calcDate + '）';
                     hint.style.color = '#e74c3c';
                 } else {
                     hint.textContent = '';
+                    hint.style.color = '';
                 }
+            } else if (calcDate && !calcDate.match(/\d{4}-\d{2}-\d{2}/) && calcDate !== '') {
+                hint.textContent = calcDate;
+                hint.style.color = '#e74c3c';
             } else {
                 hint.textContent = '';
+                hint.style.color = '';
             }
         });
+        editQueueDate.addEventListener('change', debounce(calculateDateForEdit, 150));
     }
 }
 
@@ -1196,10 +1327,14 @@ async function handleUpdateOrder(e) {
     const queueDate = document.getElementById('editQueueDate').value;
     const calcDate = document.getElementById('editCalculatedDate').value;
 
-    // 校验：排队日期不能早于可发货日期
+    if (calcDate && !calcDate.match(/^\d{4}-\d{2}-\d{2}$/) && calcDate !== '计算失败' && calcDate !== '请联系商务支持') {
+        showToast('可发货日期：' + calcDate + '，无法保存修改', 'error');
+        return;
+    }
+
     if (calcDate && calcDate.match(/\d{4}-\d{2}-\d{2}/) && queueDate) {
         if (new Date(queueDate) < new Date(calcDate)) {
-            showToast('排队日期不能早于可发货日期', 'error');
+            showToast('排队日期不能早于可发货日期（' + calcDate + '）', 'error');
             return;
         }
     }
@@ -1313,11 +1448,92 @@ function hasUnsavedOrder() {
     return model || tonnage || customer;
 }
 
-// 页面关闭/刷新前，如果有未提交的排队，清除表单
+// 清空临时行的函数（页面关闭/刷新时立即调用）
+function clearTempRowSync() {
+    if (pendingRowIndex > 0) {
+        try {
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', `${API_BASE}/api/clear-temp-row`, false); // 同步请求
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            xhr.setRequestHeader('X-Access-Password', accessPassword);
+            xhr.setRequestHeader('X-Employee-Id', employeeId);
+            xhr.send(JSON.stringify({ row_index: pendingRowIndex }));
+        } catch (err) {
+            // 忽略错误
+        }
+        pendingRowIndex = 0;
+    }
+}
+
+// 页面关闭/刷新前：使用sendBeacon清空临时行（比同步XHR更可靠）
 window.addEventListener('beforeunload', function(e) {
-    if (hasUnsavedOrder()) {
-        // 清除表单数据，不保存
-        document.getElementById('orderForm').reset();
+    if (hasUnsavedOrder() && pendingRowIndex > 0) {
+        // 使用sendBeacon确保请求发送
+        if (navigator.sendBeacon) {
+            const data = JSON.stringify({ row_index: pendingRowIndex });
+            const blob = new Blob([data], { type: 'application/json' });
+            navigator.sendBeacon(`${API_BASE}/api/clear-temp-row`, blob);
+        } else {
+            // 降级：同步XHR
+            clearTempRowSync();
+        }
+        pendingRowIndex = 0;
+    }
+});
+
+// 页面加载时：清理当前用户之前遗留的临时行（防止刷新后残留）
+window.addEventListener('load', function() {
+    // 页面加载后，如果有未提交的表单数据，清理之前的临时行
+    // 因为刷新后pendingRowIndex会重置为0，但腾讯表格中可能还有残留数据
+    setTimeout(() => {
+        if (currentUser.id) {
+            // 调用API清理当前用户所有过期的临时行
+            fetch(`${API_BASE}/api/cleanup-user-temp-rows`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Access-Password': accessPassword,
+                    'X-Employee-Id': employeeId
+                },
+                body: JSON.stringify({ submitter_id: currentUser.id })
+            }).catch(() => {});
+        }
+    }, 1000);
+});
+
+// 系统内切换标签页（订单排队/排队明细/问题反馈）：不清空临时行
+// 只在提交成功或页面关闭/刷新时才清空
+// 切换标签页后返回，继续在同一临时行操作
+function setupTabSwitchCleanup() {
+    // 不再在标签页切换时清空临时行
+    // pendingRowIndex 保持不变，用户返回后继续在同一行操作
+}
+
+// 页面可见性变化时（切换浏览器窗口/标签页）：5分钟后清空
+let tabSwitchTimer = null;
+document.addEventListener('visibilitychange', function() {
+    if (document.visibilityState === 'hidden' && hasUnsavedOrder()) {
+        // 页面隐藏时启动5分钟定时器
+        if (!tabSwitchTimer) {
+            tabSwitchTimer = setTimeout(() => {
+                if (pendingRowIndex > 0) {
+                    // 使用sendBeacon确保请求发送
+                    if (navigator.sendBeacon) {
+                        const data = JSON.stringify({ row_index: pendingRowIndex });
+                        const blob = new Blob([data], { type: 'application/json' });
+                        navigator.sendBeacon(`${API_BASE}/api/clear-temp-row`, blob);
+                    }
+                    pendingRowIndex = 0;
+                }
+                tabSwitchTimer = null;
+            }, 5 * 60 * 1000); // 5分钟
+        }
+    } else if (document.visibilityState === 'visible') {
+        // 页面重新可见时，取消定时器
+        if (tabSwitchTimer) {
+            clearTimeout(tabSwitchTimer);
+            tabSwitchTimer = null;
+        }
     }
 });
 
@@ -1396,10 +1612,6 @@ function renderAdminItems(items) {
             statusHtml = '<span class="admin-item-status ok">已配置</span>';
         }
         const mask = item.masked ? `当前：<span class="admin-item-mask">${item.masked}</span>` : '<span class="admin-item-mask">尚未保存</span>';
-        const isRenderOrGithub = (item.name === 'RENDER_API_KEY' || item.name === 'GITHUB_TOKEN');
-        const btnText = isRenderOrGithub ? '由主站管理' : '保存';
-        const btnDisabled = isRenderOrGithub ? 'disabled' : '';
-        const placeholder = isRenderOrGithub ? '此凭证由主 Render 服务管理' : `粘贴新的 ${label}，输入不会回显`;
         card.innerHTML = `
             <div class="admin-item-head">
                 <span class="admin-item-name">${label}</span>
@@ -1407,9 +1619,9 @@ function renderAdminItems(items) {
             </div>
             <div class="admin-item-mask" style="margin-bottom:8px;">${mask}</div>
             <div class="admin-item-row">
-                <input type="password" autocomplete="new-password" placeholder="${placeholder}" data-key="${item.name}" ${btnDisabled} />
-                <button type="button" class="admin-btn-validate" data-action="validate" ${btnDisabled}>校验</button>
-                <button type="button" class="admin-btn-update" data-action="update" ${btnDisabled}>${btnText}</button>
+                <input type="password" autocomplete="new-password" placeholder="粘贴新的 ${label}，输入不会回显" data-key="${item.name}" />
+                <button type="button" class="admin-btn-validate" data-action="validate">校验</button>
+                <button type="button" class="admin-btn-update" data-action="update">保存并部署</button>
             </div>
             <div class="admin-item-msg" data-msg></div>
         `;
@@ -1439,7 +1651,7 @@ async function onAdminValidate(key, input, msg) {
         const data = await r.json();
         if (data.success) {
             msg.className = 'admin-item-msg ok';
-            msg.textContent = '校验通过，可保存';
+            msg.textContent = '校验通过，可保存并部署';
         } else {
             msg.className = 'admin-item-msg err';
             msg.textContent = '校验失败：' + (data.error || '未知错误');
@@ -1457,9 +1669,9 @@ async function onAdminUpdate(key, input, msg) {
         msg.textContent = '请先粘贴新的值';
         return;
     }
-    if (!confirm(`确认更新「${ADMIN_KEY_LABELS[key] || key}」？\n将保存到 Cloudflare 备份节点。`)) return;
+    if (!confirm(`确认更新「${ADMIN_KEY_LABELS[key] || key}」？\n将写入主服务 Render 环境变量，并触发重新部署。`)) return;
     msg.className = 'admin-item-msg';
-    msg.textContent = '正在保存…';
+    msg.textContent = '正在校验、保存并触发部署…';
     try {
         const r = await apiFetch(`${API_BASE}/api/admin/update`, {
             method: 'POST',
@@ -1474,7 +1686,7 @@ async function onAdminUpdate(key, input, msg) {
             const log = document.getElementById('adminLog');
             const item = document.createElement('div');
             const t = new Date().toLocaleString();
-            item.textContent = `[${t}] ${ADMIN_KEY_LABELS[key] || key} 已更新（${data.log ? data.log.masked : ''}），已保存到 Cloudflare 节点`;
+            item.textContent = `[${t}] ${ADMIN_KEY_LABELS[key] || key} 已更新（${data.log ? data.log.masked : ''}），已写入 Render 环境变量并触发部署`;
             log.prepend(item);
             setTimeout(loadAdminStatus, 2000);
         } else {
@@ -1507,3 +1719,108 @@ async function adminHealthCheck() {
         bar.style.display = 'none';
     }
 }
+
+// 刷新产能冷却时间（毫秒），60秒
+const REFRESH_CAPACITY_COOLDOWN = 60 * 1000;
+let lastRefreshCapacityTime = 0;
+let refreshCooldownTimer = null;
+
+async function refreshCapacityData() {
+    const btn = document.getElementById('refreshCapacityBtn');
+    if (!btn || btn.disabled) return;
+
+    // 冷却时间检查
+    const now = Date.now();
+    const remaining = REFRESH_CAPACITY_COOLDOWN - (now - lastRefreshCapacityTime);
+    if (remaining > 0) {
+        const secondsLeft = Math.ceil(remaining / 1000);
+        showToast(`刷新产能过于频繁，请 ${secondsLeft} 秒后再试`, 'warning');
+        return;
+    }
+
+    btn.disabled = true;
+    const originalHTML = btn.innerHTML;
+    btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="animation:spin 1s linear infinite"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg> 刷新中...';
+    try {
+        // 100秒超时控制器，避免浏览器无限等待
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 100000);
+        const r = await apiFetch(`${API_BASE}/api/refresh-capacity-data`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        const data = await r.json();
+
+        // 记录刷新时间，启动冷却（按钮保持禁用，60秒后恢复）
+        lastRefreshCapacityTime = Date.now();
+        startRefreshCooldown(btn, originalHTML);
+
+        if (data.success) {
+            const after = data.after_refresh || {};
+            const success = after.preloaded_models || 0;
+            const total = after.total_models || 0;
+            const tokenStatus = after.token_status || 'unknown';
+            const errMsg = after.error_msg || '';
+            if (success === 0) {
+                if (tokenStatus === 'expired') {
+                    showToast('产能刷新失败：腾讯AccessToken已过期，请联系管理员在后台更新Token', 'error');
+                } else if (errMsg) {
+                    showToast('产能刷新失败：' + errMsg, 'error');
+                } else {
+                    showToast('产能刷新失败：所有型号数据均为空，请检查腾讯表格权限或网络', 'error');
+                }
+            } else if (success < total) {
+                showToast(`产能数据部分加载完成：${success}/${total} 个型号`, 'warning');
+                calculateDate();
+            } else {
+                showToast(`产能数据刷新完成：${success}/${total} 个型号`, 'success');
+                calculateDate();
+            }
+        } else {
+            showToast('刷新失败：' + (data.error || '未知错误'), 'error');
+        }
+    } catch (e) {
+        showToast('刷新请求失败：' + e.message, 'error');
+        // 请求失败时也启动冷却，防止暴力重试
+        lastRefreshCapacityTime = Date.now();
+        startRefreshCooldown(btn, originalHTML);
+    }
+}
+
+// 启动刷新冷却：按钮保持禁用状态，60秒后自动恢复
+function startRefreshCooldown(btn, originalHTML) {
+    if (refreshCooldownTimer) {
+        clearTimeout(refreshCooldownTimer);
+    }
+    // 恢复按钮文字，但保持禁用
+    btn.innerHTML = originalHTML;
+    refreshCooldownTimer = setTimeout(() => {
+        btn.disabled = false;
+        refreshCooldownTimer = null;
+    }, REFRESH_CAPACITY_COOLDOWN);
+}
+
+async function checkCacheStatus() {
+    try {
+        const r = await apiFetch(`${API_BASE}/api/cache-status`);
+        const data = await r.json();
+        if (data.success) {
+            const count = data.preloaded_models_count || 0;
+            const total = data.total_models || 0;
+            if (count === 0) {
+                showToast(`产能刷新失败：当前缓存仍为 0 个型号，请检查腾讯Token是否过期或网络是否正常`, 'error');
+            } else if (count < total) {
+                showToast(`产能数据部分加载完成：已缓存 ${count}/${total} 个型号`, 'warning');
+            } else {
+                showToast(`产能数据刷新完成：已缓存 ${count}/${total} 个型号`, 'success');
+            }
+        }
+    } catch (e) {
+        showToast('查询缓存状态失败：' + e.message, 'error');
+    }
+}
+
+
+

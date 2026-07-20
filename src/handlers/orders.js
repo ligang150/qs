@@ -1,8 +1,8 @@
-// Orders CRUD handlers
-import { readSheetRange, readSingleCell, writeOrderRow, deleteRow, updateOrderRow, clearTempRow, ensureSheetRows, SHEET_ID } from '../tencent-api.js';
+// Orders CRUD handlers - synced with Flask app.py
+import { readSheetRange, readSingleCell, writeOrderRow, deleteRow, updateOrderRow, clearTempRow, ensureSheetRows, batchUpdate, SHEET_ID, USER_FILE_ID, USER_SHEET_ID } from '../tencent-api.js';
 import { calculateDeliveryDate, clearCache } from '../calc-engine.js';
 import { readUsers } from '../tencent-api.js';
-import { jsonResponse, parseCellValue, normalizeUserKey, getBeijingTimeStr, ADMIN_EMPLOYEE_ID } from '../utils.js';
+import { jsonResponse, parseCellValue, normalizeUserKey, getBeijingTimeStr, ADMIN_EMPLOYEE_ID, isDateString, parseDate, formatDate, buildCellValue } from '../utils.js';
 
 // Pagination
 const PER_PAGE = 20;
@@ -74,6 +74,97 @@ function requireAuth(request) {
   return password === ACCESS_PASSWORD;
 }
 
+// ============ 权限辅助函数 ============
+
+async function getUserById(employeeId) {
+  const currentId = normalizeUserKey(employeeId);
+  if (!currentId) return null;
+  const users = await readUsers();
+  for (const u of users) {
+    if (normalizeUserKey(u.employee_id) === currentId) return u;
+  }
+  return null;
+}
+
+async function getUserByName(name) {
+  const n = String(name || "").trim();
+  if (!n) return null;
+  const users = await readUsers();
+  for (const u of users) {
+    if (String(u.name || "").trim() === n) return u;
+  }
+  return null;
+}
+
+async function getOrderSubmitterUser(order) {
+  return await getUserById(order.submitter_id) || await getUserByName(order.submitter);
+}
+
+function isSameSubmitter(order, submitterId, submitterName) {
+  const sid = normalizeUserKey(submitterId);
+  const sn = String(submitterName || "").trim();
+  if (sid && normalizeUserKey(order.submitter_id) === sid) return true;
+  if (sn && String(order.submitter || "").trim() === sn) return true;
+  return false;
+}
+
+async function canOperateOrder(order, currentUser, submitterId, submitterName, viewMode = "mine") {
+  const accessLevel = (currentUser || {}).access_level || "self";
+  if (viewMode === "mine") return isSameSubmitter(order, submitterId, submitterName);
+  if (accessLevel === "admin") return true;
+  if (accessLevel === "department" || accessLevel === "self") {
+    const currentDept = String((currentUser || {}).department || "").trim();
+    if (!currentDept) return true; // fallback: allow all when dept info incomplete
+    const orderUser = await getOrderSubmitterUser(order);
+    const orderDept = String((orderUser || {}).department || "").trim();
+    return !!(currentDept && orderDept && currentDept === orderDept);
+  }
+  return isSameSubmitter(order, submitterId, submitterName);
+}
+
+function orderMatchesExpected(order, expected) {
+  if (!expected) return true;
+  const keys = ["model", "customer", "submitter_id", "submit_time"];
+  for (const key of keys) {
+    const expectedVal = String(expected[key] || "").trim();
+    if (expectedVal && String(order[key] || "").trim() !== expectedVal) return false;
+  }
+  return true;
+}
+
+// ============ 查找空行 ============
+
+async function getNextEmptyRow(startFrom = 2, maxBatches = 50) {
+  const batchSize = 200;
+  for (let offset = 0; offset < maxBatches * batchSize; offset += batchSize) {
+    const start = offset + 1;
+    const end = offset + batchSize;
+    if (start < startFrom) continue;
+    const actualStart = Math.max(start, startFrom);
+    const gridData = await readSheetRange(SHEET_ID, `A${actualStart}:A${end}`);
+    const rows = gridData.rows || [];
+    if (rows.length === 0) return actualStart;
+
+    for (let i = 0; i < rows.length; i++) {
+      const actualRow = actualStart + i;
+      if (actualRow < 2) continue;
+      const values = rows[i].values || [];
+      const aVal = values.length > 0 && values[0].cellValue ? parseCellValue(values[0].cellValue) : "";
+      if (!aVal) return actualRow;
+    }
+
+    if (rows.length < batchSize) {
+      const nextRow = actualStart + rows.length;
+      const verify = await readSingleCell(SHEET_ID, `A${nextRow}`);
+      if (verify && verify.trim()) continue;
+      return nextRow;
+    }
+  }
+  return 0;
+}
+
+// ============ 订单API ============
+
 export async function handleGetOrders(request) {
   if (!requireAuth(request)) {
     return jsonResponse({ success: false, error: "未授权", need_auth: true }, 401);
@@ -86,34 +177,42 @@ export async function handleGetOrders(request) {
     const filterCustomer = url.searchParams.get('customer') || '';
     const sortBy = url.searchParams.get('sort') || '';
     const submitterId = normalizeUserKey(request.headers.get('X-Employee-Id') || '');
+    const submitterName = request.headers.get('X-Employee-Name') || '';
     const viewAll = url.searchParams.get('all') === '1';
 
     const allOrders = await readAllOrders();
+
+    // Get user info
+    const currentUser = await getUserById(submitterId);
 
     // Filter by user access level
     let visibleOrders;
     if (viewAll && submitterId === ADMIN_EMPLOYEE_ID) {
       visibleOrders = allOrders;
     } else {
-      // Get user access info
-      const users = await readUsers();
-      let user = null;
-      for (const u of users) {
-        if (normalizeUserKey(u.employee_id) === submitterId) { user = u; break; }
-      }
-
-      if (user && (user.access_level === 'admin' || user.access_level === 'department')) {
-        if (user.access_level === 'admin') {
-          visibleOrders = allOrders;
+      const accessLevel = (currentUser || {}).access_level || "self";
+      if (accessLevel === "admin") {
+        visibleOrders = allOrders;
+      } else if (accessLevel === "department") {
+        // Department: show own + same department
+        const currentDept = String((currentUser || {}).department || "").trim();
+        if (!currentDept) {
+          visibleOrders = allOrders; // fallback
         } else {
-          visibleOrders = allOrders.filter(o =>
-            normalizeUserKey(o.submitter_id) === submitterId
-          );
+          const results = [];
+          for (const o of allOrders) {
+            if (isSameSubmitter(o, submitterId, submitterName)) {
+              results.push(o);
+              continue;
+            }
+            const orderUser = await getOrderSubmitterUser(o);
+            const orderDept = String((orderUser || {}).department || "").trim();
+            if (currentDept === orderDept) results.push(o);
+          }
+          visibleOrders = results;
         }
       } else {
-        visibleOrders = allOrders.filter(o =>
-          normalizeUserKey(o.submitter_id) === submitterId
-        );
+        visibleOrders = allOrders.filter(o => isSameSubmitter(o, submitterId, submitterName));
       }
     }
 
@@ -163,47 +262,42 @@ export async function handleCreateOrder(request) {
     const remark = `${tonnage}${customer}`;
     const submitTime = getBeijingTimeStr();
 
-    // Find first empty row
-    let targetRow = 2;
+    // Scan for empty row with retry (up to 3 times)
+    let targetRow = 0;
+    let scanStart = 2;
+    const maxRetries = 3;
 
-    // Scan for empty row in column A
-    const batchSize = 200;
-    for (let offset = 0; offset < 4000; offset += batchSize) {
-      const start = offset + 1;
-      const end = offset + batchSize;
-      const gridData = await readSheetRange(SHEET_ID, `A${start}:A${end}`);
-      const rows = gridData.rows || [];
-      if (rows.length === 0) { targetRow = start; break; }
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      const candidateRow = await getNextEmptyRow(scanStart, 50);
+      if (candidateRow < 2) candidateRow = 2;
 
-      let found = false;
-      for (let i = 0; i < rows.length; i++) {
-        const actualRow = start + i;
-        if (actualRow < 2) continue;
-        const values = rows[i].values || [];
-        const aVal = values.length > 0 && values[0].cellValue ? parseCellValue(values[0].cellValue) : "";
-        if (!aVal) { targetRow = actualRow; found = true; break; }
+      // Ensure enough rows
+      await ensureSheetRows(candidateRow + 10);
+
+      // Verify: target row A column must be empty
+      const verifyVal = await readSingleCell(SHEET_ID, `A${candidateRow}`);
+      if (verifyVal && verifyVal.trim()) {
+        console.log(`[create_order] 第${attempt + 1}次尝试：行${candidateRow} A列有值（${verifyVal}），继续往下找...`);
+        scanStart = candidateRow + 1;
+        continue;
       }
-      if (found) break;
 
-      if (rows.length < batchSize) {
-        targetRow = start + rows.length;
-        // Verify
-        const verify = await readSingleCell(SHEET_ID, `A${targetRow}`);
-        if (verify && verify.trim()) continue;
-        break;
-      }
+      targetRow = candidateRow;
+      console.log(`[create_order] 找到空行：行${targetRow}（第${attempt + 1}次尝试）`);
+      break;
     }
 
-    // Calculate serial number based on count
-    const allOrders = await readAllOrders();
-    const serialNo = `CF${String(allOrders.length + 1).padStart(3, '0')}`;
+    if (!targetRow) {
+      return jsonResponse({ success: false, error: "未能找到可用空行，请稍后重试" });
+    }
 
-    // Ensure enough rows
-    await ensureSheetRows(targetRow + 10);
+    // Serial number: use row number
+    const serialNo = String(targetRow);
 
     // Write order
+    const writeRowIdx = targetRow - 1;
     const result = await writeOrderRow(
-      targetRow - 1, model, tonnage, customer, expectedDate, "", queueDate,
+      writeRowIdx, model, tonnage, customer, expectedDate, "", queueDate,
       submitter, remark, serialNo, submitterId, submitTime
     );
 
@@ -211,12 +305,37 @@ export async function handleCreateOrder(request) {
       return jsonResponse({ success: false, error: "写入表格失败" });
     }
 
+    // Write M column (首次录入吨位)
+    try {
+      const mColBody = {
+        requests: [{
+          updateRangeRequest: {
+            sheetId: SHEET_ID,
+            gridData: {
+              startRow: writeRowIdx,
+              startColumn: 12,  // M column (index 12)
+              rows: [{
+                values: [
+                  buildCellValue(tonnage, false, true),
+                ]
+              }]
+            }
+          }
+        }]
+      };
+      await batchUpdate(mColBody);
+      console.log(`[create_order] 已写入M列首次录入吨位：${tonnage}，行${targetRow}`);
+    } catch (mErr) {
+      console.log(`[create_order] 写入M列首次录入吨位失败（不影响主流程）：${mErr.message}`);
+    }
+
     // Invalidate cache
     ordersCache = null;
 
     return jsonResponse({
       success: true,
-      order: parseOrderRow([model, tonnage, customer, expectedDate, "", queueDate, submitter, remark, serialNo, "", submitterId, submitTime])
+      message: "订单创建成功",
+      row: targetRow
     });
   } catch (e) {
     return jsonResponse({ success: false, error: e.message });
@@ -262,12 +381,68 @@ export async function handleUpdateOrder(request) {
     const expectedDate = data.expected_date || '';
     const queueDate = data.queue_date || '';
     const submitter = data.submitter || '';
+    const submitterId = data.submitter_id || '';
 
-    const result = await updateOrderRow(rowIndex, model, tonnage, customer, expectedDate, "", queueDate, submitter, "");
+    const remark = `${tonnage}${customer}`;
+    const currentUser = await getUserById(submitterId) || {};
+
+    // Read original order for permission check and tonnage validation
+    const gridData = await readSheetRange(SHEET_ID, `A${rowIndex}:L${rowIndex}`);
+    const rows = gridData.rows || [];
+    if (!rows.length) return jsonResponse({ success: false, error: "订单不存在" });
+
+    const origValues = rows[0].values.map(v => parseCellValue(v.cellValue));
+    const originalTonnage = origValues[1] || "0";
+    const originalQueueDate = origValues[5] || "";
+    const originalOrder = {
+      submitter: origValues[6] || "",
+      submitter_id: origValues[10] || ""
+    };
+
+    // Permission check
+    if (!await canOperateOrder(originalOrder, currentUser, submitterId, submitter, "all")) {
+      return jsonResponse({ success: false, error: "无权修改他人订单" });
+    }
+
+    // Tonnage can only decrease
+    try {
+      if (parseFloat(tonnage) > parseFloat(originalTonnage)) {
+        return jsonResponse({ success: false, error: "吨位只能改小不能改大" });
+      }
+    } catch (e) { /* ignore parse error */ }
+
+    // Recalculate delivery date with capacity compensation
+    const hasOriginalQueue = !!(originalQueueDate && isDateString(originalQueueDate) && originalTonnage);
+    const [calcDateForUpdate, calcError] = await calculateDeliveryDate(
+      model, tonnage, expectedDate,
+      hasOriginalQueue ? originalQueueDate : null,
+      hasOriginalQueue ? originalTonnage : null
+    );
+
+    // Block if "请联系商务支持"
+    if (calcDateForUpdate && calcDateForUpdate === "请联系商务支持") {
+      return jsonResponse({ success: false, error: "可发货日期：请联系商务支持，无法保存修改" });
+    }
+
+    // Validate queue_date >= calculated_date
+    if (calcDateForUpdate && isDateString(calcDateForUpdate) && queueDate && isDateString(queueDate)) {
+      const calcD = parseDate(calcDateForUpdate);
+      const queueD = parseDate(queueDate);
+      if (queueD < calcD) {
+        return jsonResponse({ success: false, error: `排队日期不能早于可发货日期（${calcDateForUpdate}）` });
+      }
+    }
+
+    const submitTime = getBeijingTimeStr();
+    const result = await writeOrderRow(
+      rowIndex - 1, model, tonnage, customer, expectedDate,
+      calcDateForUpdate, queueDate, submitter, remark, String(rowIndex), submitterId, submitTime
+    );
+
     if (!result.ok) return jsonResponse({ success: false, error: "更新失败" });
 
     ordersCache = null;
-    return jsonResponse({ success: true });
+    return jsonResponse({ success: true, message: "订单修改成功" });
   } catch (e) {
     return jsonResponse({ success: false, error: e.message });
   }
@@ -282,11 +457,41 @@ export async function handleDeleteOrder(request) {
     const rowIndex = parseInt(parts[parts.length - 1]);
     if (!rowIndex) return jsonResponse({ success: false, error: "无效行号" });
 
+    const data = await request.json().catch(() => ({}));
+    const expectedOrder = data.order || data;
+    const submitterId = new URL(request.url).searchParams.get('submitter_id') || '';
+    const submitterName = new URL(request.url).searchParams.get('submitter_name') || '';
+    const currentUser = await getUserById(submitterId) || {};
+
+    // Read original order for validation and permission check
+    const gridData = await readSheetRange(SHEET_ID, `A${rowIndex}:L${rowIndex}`);
+    const rows = gridData.rows || [];
+    if (!rows.length) return jsonResponse({ success: false, error: "订单不存在" });
+
+    const origValues = rows[0].values.map(v => parseCellValue(v.cellValue));
+    const originalOrder = {
+      model: origValues[0] || "",
+      customer: origValues[2] || "",
+      submitter: origValues[6] || "",
+      submitter_id: origValues[10] || "",
+      submit_time: origValues[11] || ""
+    };
+
+    // Data consistency check
+    if (!orderMatchesExpected(originalOrder, expectedOrder)) {
+      return jsonResponse({ success: false, error: "订单行号已变化，请刷新后重试，未执行删除" });
+    }
+
+    // Permission check
+    if (!await canOperateOrder(originalOrder, currentUser, submitterId, submitterName, "all")) {
+      return jsonResponse({ success: false, error: "无权删除他人订单" });
+    }
+
     const result = await deleteRow(rowIndex);
     if (!result.ok) return jsonResponse({ success: false, error: "删除失败" });
 
     ordersCache = null;
-    return jsonResponse({ success: true });
+    return jsonResponse({ success: true, message: "订单删除成功" });
   } catch (e) {
     return jsonResponse({ success: false, error: e.message });
   }
@@ -300,11 +505,17 @@ export async function handleCalculateDate(request) {
     const model = (data.model || '').trim();
     const tonnage = data.tonnage || '';
     const expectedDate = (data.expected_date || '').trim();
+    const originalQueueDate = data.original_queue_date || '';
+    const originalTonnage = data.original_tonnage || '';
     const forceRefresh = !!data.force_refresh;
 
     if (forceRefresh) clearCache();
 
-    const [calculatedDate, errorMsg] = await calculateDeliveryDate(model, tonnage, expectedDate);
+    const [calculatedDate, errorMsg] = await calculateDeliveryDate(
+      model, tonnage, expectedDate,
+      originalQueueDate || null,
+      originalTonnage || null
+    );
 
     if (errorMsg && errorMsg !== "请联系商务支持") {
       return jsonResponse({ success: false, error: errorMsg });
@@ -341,5 +552,87 @@ export async function handleCleanupTempRows(request) {
 export async function handleUpdatePassword(request) {
   if (!requireAuth(request)) return jsonResponse({ success: false, error: "未授权", need_auth: true }, 401);
 
-  return jsonResponse({ success: false, error: "CloudFlare版本暂不支持修改密码，请在主服务操作" });
+  try {
+    const data = await request.json();
+    const employeeId = data.employee_id || '';
+    const oldPassword = data.old_password || '';
+    const newPassword = data.new_password || '';
+
+    if (!employeeId || !oldPassword || !newPassword) {
+      return jsonResponse({ success: false, error: "参数不完整" });
+    }
+    if (newPassword.length < 6) {
+      return jsonResponse({ success: false, error: "新密码至少6位" });
+    }
+    if (!(/[a-zA-Z]/.test(newPassword) && /\d/.test(newPassword))) {
+      return jsonResponse({ success: false, error: "密码必须同时包含字母和数字" });
+    }
+
+    // Read user table to find the row
+    const { readSheetRange: readRange, batchUpdate: doUpdate, getAccessToken } = await import('../tencent-api.js');
+    const token = await getAccessToken();
+    const headers = {
+      "Content-Type": "application/json",
+      "Access-Token": token,
+      "Open-Id": "9bc172e5338147d8a35c1438ea8d1577",
+      "Client-Id": "da815d1227294457b43413bdc16e3e90"
+    };
+
+    const resp = await fetch(`https://docs.qq.com/openapi/spreadsheet/v3/files/${USER_FILE_ID}/${USER_SHEET_ID}/A2:C200`, {
+      headers,
+      signal: AbortSignal.timeout(8000)
+    });
+    if (!resp.ok) return jsonResponse({ success: false, error: "读取用户表失败" });
+    const respData = await resp.json();
+    const rows = respData.gridData?.rows || [];
+    let targetRow = null;
+
+    for (let i = 0; i < rows.length; i++) {
+      const values = rows[i].values || [];
+      const rowData = values.map(v => parseCellValue(v.cellValue));
+      if (rowData.length >= 2 && normalizeUserKey(rowData[1]) === normalizeUserKey(employeeId)) {
+        if (rowData.length >= 3 && rowData[2] === oldPassword) {
+          targetRow = i + 2; // A2 start, so +2
+        } else {
+          return jsonResponse({ success: false, error: "旧密码错误" });
+        }
+        break;
+      }
+    }
+
+    if (targetRow === null) {
+      return jsonResponse({ success: false, error: "员工号不存在" });
+    }
+
+    // Update password (C column, text format)
+    const body = {
+      requests: [{
+        updateRangeRequest: {
+          sheetId: USER_SHEET_ID,
+          gridData: {
+            startRow: targetRow - 1,  // 0-based
+            startColumn: 2,  // C column
+            rows: [{ values: [{ cellValue: { text: newPassword } }] }]
+          }
+        }
+      }]
+    };
+
+    const updateResp = await fetch(`https://docs.qq.com/openapi/spreadsheet/v3/files/${USER_FILE_ID}/batchUpdate`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(8000)
+    });
+
+    const updateData = await updateResp.json();
+    if (updateData.responses) {
+      // Clear user cache by invalidating orders cache
+      ordersCache = null;
+      return jsonResponse({ success: true, message: "密码修改成功" });
+    }
+    return jsonResponse({ success: false, error: JSON.stringify(updateData) });
+  } catch (e) {
+    return jsonResponse({ success: false, error: e.message });
+  }
 }
