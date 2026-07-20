@@ -1023,6 +1023,30 @@ async function handleGetOrders(request) {
         }
       }
     }
+    const today = /* @__PURE__ */ new Date();
+    today.setHours(0, 0, 0, 0);
+    for (let i = visibleOrders.length - 1; i >= 0; i--) {
+      const o = visibleOrders[i];
+      const edStr = (o.expected_date || "").trim();
+      const qdStr = (o.queue_date || "").trim();
+      let expectedPassed = false;
+      let hasFutureQueueDate = false;
+      if (edStr && /^\d{4}-\d{2}-\d{2}$/.test(edStr)) {
+        const ed = new Date(edStr);
+        if (!isNaN(ed.getTime()) && ed < today) {
+          expectedPassed = true;
+        }
+      }
+      if (qdStr && /^\d{4}-\d{2}-\d{2}$/.test(qdStr)) {
+        const qd = new Date(qdStr);
+        if (!isNaN(qd.getTime()) && qd >= today) {
+          hasFutureQueueDate = true;
+        }
+      }
+      if (expectedPassed && !hasFutureQueueDate) {
+        visibleOrders.splice(i, 1);
+      }
+    }
     if (modelFilter) {
       for (let i = visibleOrders.length - 1; i >= 0; i--) {
         if (visibleOrders[i].model !== modelFilter) visibleOrders.splice(i, 1);
