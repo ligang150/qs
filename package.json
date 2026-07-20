@@ -6,5 +6,8 @@
   "scripts": {
     "deploy": "wrangler deploy",
     "dev": "wrangler dev"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.1"
   }
 }

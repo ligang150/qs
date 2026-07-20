@@ -91,8 +91,18 @@ export default {
         return jsonResponse({ success: false, error: "Not Found" }, 404);
       }
 
-      // For non-API paths, return the index.html (SPA fallback)
-      // This is served by Cloudflare [assets] binding
+      // For non-API paths, let Cloudflare Pages serve static assets or fall back to index.html
+      try {
+        // Try to serve from assets binding
+        if (env.ASSETS) {
+          const assetResponse = await env.ASSETS.fetch(request);
+          if (assetResponse && assetResponse.status !== 404) return assetResponse;
+        }
+        // SPA fallback: serve index.html for all non-API routes
+        const indexResponse = env.ASSETS ? await env.ASSETS.fetch(new Request(new URL('/index.html', request.url))) : null;
+        if (indexResponse && indexResponse.status !== 404) return indexResponse;
+      } catch (e) { /* fall through */ }
+
       return new Response('Not Found', { status: 404 });
     } catch (e) {
       console.error(`[Worker] Error handling ${path}:`, e.message);

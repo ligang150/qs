@@ -268,7 +268,7 @@ export async function handleCreateOrder(request) {
     const maxRetries = 3;
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
-      const candidateRow = await getNextEmptyRow(scanStart, 50);
+      let candidateRow = await getNextEmptyRow(scanStart, 50);
       if (candidateRow < 2) candidateRow = 2;
 
       // Ensure enough rows
