@@ -714,11 +714,20 @@ async function loadOrders(page = 1, forceRefresh = false, options = {}) {
         if (data.success) {
             const newOrders = (data.orders || []).filter(order => !isRecentlyDeletedOrder(order));
             // 日期过滤：期望发货日期或排队日期 >= 今天
-            const todayStr = new Date().toISOString().slice(0, 10);
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            function parseCnDate(str) {
+                if (!str) return null;
+                const m = String(str).trim().match(/(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日?/);
+                if (m) return new Date(parseInt(m[1]), parseInt(m[2]) - 1, parseInt(m[3]));
+                const d = new Date(str);
+                if (!isNaN(d.getTime())) return d;
+                return null;
+            }
             const filtered = newOrders.filter(order => {
-                const ed = (order.expected_date || '').trim();
-                const qd = (order.queue_date || '').trim();
-                return (ed && ed >= todayStr) || (qd && qd >= todayStr);
+                const ed = parseCnDate(order.expected_date);
+                const qd = parseCnDate(order.queue_date);
+                return (ed && ed >= today) || (qd && qd >= today);
             });
             // 保存到对应viewMode的缓存（使用请求时的viewMode，不用后端返回值覆盖）
             const requestViewMode = viewMode;
